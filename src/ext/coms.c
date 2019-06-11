@@ -106,6 +106,11 @@ BOOL_T ddtrace_coms_initialize() {
     return TRUE;
 }
 
+
+void printf_stack_info(ddtrace_coms_stack_t *stack) {
+    printf("stack (%p) refcount: (%lu) bytes_written: (%lu)\n", stack, atomic_load(&stack->refcount), atomic_load(&stack->bytes_written));
+}
+
 BOOL_T ddtrace_coms_rotate_stack() {
     ddtrace_coms_stack_t *next_stack = NULL;
     ddtrace_coms_stack_t *current_stack = atomic_load(&ddtrace_coms_global_state.current_stack);
