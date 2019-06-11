@@ -23,13 +23,12 @@
 
 struct _writer_loop_data_t {
     pthread_t thread;
-    pthread_mutex_t mutex;
-    pthread_cond_t condition;
+    pthread_mutex_t mutex, finished_flush_mutex;
+    pthread_cond_t condition, finished_flush_condition;
+
     BOOL_T running;  // needs to be guarded by mutex
-    _Atomic(BOOL_T) shutdown;
-    _Atomic(BOOL_T) send;
-    _Atomic(uint32_t) request_counter;
-    _Atomic(uint32_t) requests_since_last_flush;
+    _Atomic(BOOL_T) shutdown, send;
+    _Atomic(uint32_t) request_counter, flush_counter, requests_since_last_flush;
 };
 
 inline static uint32_t get_flush_interval() {
@@ -181,12 +180,17 @@ static void *writer_loop(void *_) {
         atomic_store(&writer->requests_since_last_flush, 0);
 
         ddtrace_coms_stack_t *stack;
+        ddtrace_coms_rotate_stack();
         while ((stack = ddtrace_coms_attempt_acquire_stack())) {
             if (atomic_load(&writer->send)) {
                 curl_send_stack(stack);
             }
             ddtrace_coms_free_stack(stack);
         }
+        atomic_fetch_add(&writer->flush_counter, 1);
+        pthread_cond_signal(&writer->finished_flush_condition);
+        fflush(stdout);
+
     } while (!atomic_load(&writer->shutdown));
 
     pthread_exit(NULL);
@@ -254,4 +258,18 @@ BOOL_T ddtrace_coms_shutdown_writer(BOOL_T immediate) {
     }
 
     return TRUE;
+}
+
+BOOL_T ddtrace_coms_syncronous_flush() {
+    struct _writer_loop_data_t *writer = get_writer();
+    uint32_t previous_flush_counter = atomic_load(&writer->flush_counter);
+
+    ddtrace_coms_trigger_writer_flush();
+
+    while (previous_flush_counter == atomic_load(&writer->flush_counter)) {
+        pthread_mutex_lock(&writer->finished_flush_mutex);
+        struct timespec deadline = deadline_in_ms(100);
+        pthread_cond_timedwait(&writer->finished_flush_condition, &writer->finished_flush_mutex, &deadline);
+        pthread_mutex_unlock(&writer->finished_flush_mutex);
+    }
 }

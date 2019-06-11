@@ -402,7 +402,6 @@ static PHP_FUNCTION(dd_trace_coms_flush_span) {
 
     RETURN_BOOL(ddtrace_coms_flush_data(Z_LVAL_P(group_id), Z_STRVAL_P(payload), Z_STRLEN_P(payload)));
 }
-
 static PHP_FUNCTION(dd_trace_flush_span) {
     PHP5_UNUSED(return_value_used, this_ptr, return_value_ptr, ht TSRMLS_CC);
 
@@ -492,6 +491,9 @@ static PHP_FUNCTION(dd_trace_internal_fn) {
             rv = TRUE;
         } else if (FUNCTION_NAME_MATCHES("test_msgpack_consumer", fn, fn_len)) {
             ddtrace_coms_test_msgpack_consumer();
+            rv = TRUE;
+        } else if (FUNCTION_NAME_MATCHES("synchronous_flush", fn, fn_len)) {
+            ddtrace_coms_syncronous_flush();
             rv = TRUE;
         }
     }
