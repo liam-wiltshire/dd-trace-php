@@ -68,18 +68,20 @@ static PHP_MINIT_FUNCTION(ddtrace) {
     ddtrace_coms_initialize();
     ddtrace_coms_init_and_start_writer();
 
+
     return SUCCESS;
 }
 
 static PHP_MSHUTDOWN_FUNCTION(ddtrace) {
     UNUSED(module_number, type);
+    ddtrace_coms_synchronous_flush();
+    // ddtrace_coms_shutdown_writer(TRUE);
+
     UNREGISTER_INI_ENTRIES();
 
     if (DDTRACE_G(disable)) {
         return SUCCESS;
     }
-
-    ddtrace_coms_shutdown_writer(TRUE);
     return SUCCESS;
 }
 
@@ -493,7 +495,7 @@ static PHP_FUNCTION(dd_trace_internal_fn) {
             ddtrace_coms_test_msgpack_consumer();
             rv = TRUE;
         } else if (FUNCTION_NAME_MATCHES("synchronous_flush", fn, fn_len)) {
-            ddtrace_coms_syncronous_flush();
+            ddtrace_coms_synchronous_flush();
             rv = TRUE;
         }
     }

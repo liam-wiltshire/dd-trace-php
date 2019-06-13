@@ -22,6 +22,7 @@
 #define DEFAULT_AGENT_TIMEOUT (500)
 
 struct _writer_loop_data_t {
+    CURL *curl;
     pthread_t thread;
     pthread_mutex_t mutex, finished_flush_mutex;
     pthread_cond_t condition, finished_flush_condition;
@@ -113,29 +114,32 @@ static struct _writer_loop_data_t global_writer = {.mutex = PTHREAD_MUTEX_INITIA
 
 inline static struct _writer_loop_data_t *get_writer() { return &global_writer; }
 
-inline static void curl_send_stack(ddtrace_coms_stack_t *stack) {
-    CURL *curl = curl_easy_init();
-    if (curl) {
-        CURLcode res;
-        curl_set_hostname(curl);
-        curl_set_timeout(curl);
-        curl_set_connect_timeout(curl);
+inline static void curl_send_stack(struct _writer_loop_data_t *writer, ddtrace_coms_stack_t *stack) {
+    if (!writer->curl) {
+        writer->curl = curl_easy_init();
 
         struct curl_slist *headers = NULL;
         headers = curl_slist_append(headers, "Transfer-Encoding: chunked");
         headers = curl_slist_append(headers, "Content-Type: application/msgpack");
+        curl_easy_setopt(writer->curl, CURLOPT_HTTPHEADER, headers);
 
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_UPLOAD, 1);
-        curl_easy_setopt(curl, CURLOPT_INFILESIZE, 10);
-        curl_easy_setopt(curl, CURLOPT_VERBOSE, 0L);
+        curl_easy_setopt(writer->curl, CURLOPT_READFUNCTION, ddtrace_coms_read_callback);
+        curl_easy_setopt(writer->curl, CURLOPT_WRITEFUNCTION, dummy_write_callback);
+    }
+    CURL *curl = writer->curl;
+    if (curl) {
+        CURLcode res;
 
         void *read_data = ddtrace_init_read_userdata(stack);
 
         curl_easy_setopt(curl, CURLOPT_READDATA, read_data);
-        curl_easy_setopt(curl, CURLOPT_READFUNCTION, ddtrace_coms_read_callback);
+        curl_set_hostname(writer->curl);
+        curl_set_timeout(writer->curl);
+        curl_set_connect_timeout(writer->curl);
 
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, dummy_write_callback);
+        curl_easy_setopt(writer->curl, CURLOPT_UPLOAD, 1);
+        curl_easy_setopt(writer->curl, CURLOPT_INFILESIZE, 10);
+        curl_easy_setopt(writer->curl, CURLOPT_VERBOSE, 1L);
 
         res = curl_easy_perform(curl);
 
@@ -153,11 +157,29 @@ inline static void curl_send_stack(ddtrace_coms_stack_t *stack) {
             }
         }
 
-        curl_easy_cleanup(curl);
-        curl_slist_free_all(headers);
+        // curl_easy_cleanup(curl);
+        // curl_slist_free_all(headers);
 
         ddtrace_deinit_read_userdata(read_data);
     }
+}
+
+static void *better_writer_loop(void *_) {
+    UNUSED(_);
+    struct _writer_loop_data_t *writer = get_writer();
+
+
+    do {
+
+
+        ddtrace_coms_stack_t *stack;
+        ddtrace_coms_threadsafe_rotate_stack();
+        while ((stack = ddtrace_coms_attempt_acquire_stack())){
+            curl_send_stack(writer, stack);
+            ddtrace_coms_free_stack(stack);
+        }
+    }
+
 }
 
 static void *writer_loop(void *_) {
@@ -175,22 +197,20 @@ static void *writer_loop(void *_) {
             pthread_cond_timedwait(&writer->condition, &writer->mutex, &deadline);
             pthread_mutex_unlock(&writer->mutex);
         }
+        ddtrace_coms_threadsafe_rotate_stack();
 
-        ddtrace_coms_rotate_stack();
         atomic_store(&writer->requests_since_last_flush, 0);
 
         ddtrace_coms_stack_t *stack;
-        ddtrace_coms_rotate_stack();
+        ddtrace_coms_threadsafe_rotate_stack();
         while ((stack = ddtrace_coms_attempt_acquire_stack())) {
             if (atomic_load(&writer->send)) {
-                curl_send_stack(stack);
+                curl_send_stack(writer, stack);
             }
             ddtrace_coms_free_stack(stack);
         }
         atomic_fetch_add(&writer->flush_counter, 1);
         pthread_cond_signal(&writer->finished_flush_condition);
-        fflush(stdout);
-
     } while (!atomic_load(&writer->shutdown));
 
     pthread_exit(NULL);
@@ -214,6 +234,13 @@ BOOL_T ddtrace_coms_init_and_start_writer() {
     }
 
     return FALSE;
+}
+
+BOOL_T ddtrace_coms_threadsafe_rotate_stack(){
+    struct _writer_loop_data_t *writer = get_writer();
+    pthread_mutex_lock(&writer->mutex);
+    ddtrace_coms_rotate_stack();
+    pthread_mutex_unlock(&writer->mutex);
 }
 
 BOOL_T ddtrace_coms_trigger_writer_flush() {
@@ -260,16 +287,30 @@ BOOL_T ddtrace_coms_shutdown_writer(BOOL_T immediate) {
     return TRUE;
 }
 
-BOOL_T ddtrace_coms_syncronous_flush() {
+BOOL_T ddtrace_coms_synchronous_flush() {
     struct _writer_loop_data_t *writer = get_writer();
     uint32_t previous_flush_counter = atomic_load(&writer->flush_counter);
+    // atomic_store(&writer->shutdown, TRUE);
 
-    ddtrace_coms_trigger_writer_flush();
+    // ddtrace_coms_trigger_writer_flush();
+
+    if (pthread_mutex_trylock(&writer->mutex) == 0) {
+        pthread_cond_signal(&writer->condition);
+        pthread_mutex_unlock(&writer->mutex);
+    }
+
 
     while (previous_flush_counter == atomic_load(&writer->flush_counter)) {
+        if (!writer->running) {
+            break;
+        }
+        // printf(".");
+        fflush(stdout);
         pthread_mutex_lock(&writer->finished_flush_mutex);
         struct timespec deadline = deadline_in_ms(100);
         pthread_cond_timedwait(&writer->finished_flush_condition, &writer->finished_flush_mutex, &deadline);
         pthread_mutex_unlock(&writer->finished_flush_mutex);
     }
+    // atomic_store(&writer->shutdown, FALSE);
+    return TRUE;
 }

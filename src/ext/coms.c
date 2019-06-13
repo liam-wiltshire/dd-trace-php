@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "coms.h"
+#include "coms_curl.h"
 #include "env_config.h"
 #include "mpack.h"
 #include "vendor_stdatomic.h"
@@ -170,8 +171,15 @@ BOOL_T ddtrace_coms_flush_data(uint32_t group_id, const char *data, size_t size)
     if (size == 0) {
         return FALSE;
     }
+    BOOL_T store_result = store_data(group_id, data, size);
+    if (store_result == ENOMEM) {
+        ddtrace_coms_threadsafe_rotate_stack();
+        ddtrace_coms_trigger_writer_flush(); // TODO make optional, rotate synchronously and trigger flush
 
-    if (store_data(group_id, data, size) == 0) {
+        store_result = store_data(group_id, data, size);
+    }
+
+    if (store_result == 0) {
         return TRUE;
     } else {
         return FALSE;
